@@ -1,0 +1,134 @@
+#!/bin/env python3
+
+import sys
+import time
+import serial
+from PIL import Image
+from select import select
+from threading import Thread
+
+default_palette = [
+    b'\x00\x00\x00', # background
+    b'\x80\x80\x00', # channel 1 - dark
+    b'\x80\x80\x00', # channel 1 - mid
+    b'\xff\xff\x00', # channel 1
+    b'\x00\xff\xff', # trigger
+    b'\x00\x80\x80', # channel 2 - dark
+    b'\x00\x80\x80', # channel 2 - mid
+    b'\x00\xff\xff', # channel 2 - bright
+    b'\x00\xff\x00', # trig'd - green
+    b'\xff\x00\x00', # stop - red
+    b'\xc0\xc0\x00', # cursor
+    b'\xff\x00\xff', # ???
+    b'\xff\xaf\x00', # text info overlay
+    b'\xff\xff\xff', # text
+    b'\xa0\xa0\xb0', # grid and ui selected
+    b'\x10\x30\x70', # ui background
+]
+
+def getId():
+    io.write(b'*IDN?\n')
+    print(repr(io.readline()))
+
+
+def readBlock():
+    buffer = io.read(10)
+    block_len_header = int(chr(buffer[1]))
+    block_len = int(buffer[2:][:block_len_header].decode('ascii'))
+    block = buffer[2 + block_len_header:]
+    block += io.read(block_len - len(block))
+    return block
+
+
+def convertImage(block, colors=default_palette):
+    width, height = (320, 234)
+    img_buf = b''
+    for i in range(len(block)):
+        img_buf += colors[(block[i] & 0xf0) >> 4]
+        img_buf += colors[block[i] & 0x0f]
+    img = Image.frombuffer('RGB', (width, height), img_buf, 'raw')
+    return img
+    
+    
+def screenshot(filename=None):
+    io.write(b':DISP:OUTP?\n')
+    block = readBlock()
+    img = convertImage(block)
+    if filename:
+        img.save(filename) 
+    return img
+    
+def gif(filename, timeout=None):
+    start = time.time()
+    frame_list = []
+    thread_list = []
+
+    print('press any key to stop recording')
+
+    while True:
+        io.write(b':DISP:OUTP?\n')
+        block = readBlock()
+
+        def conv():
+            frame_list.append(convertImage(block))
+            print('.', flush=True, end='')
+
+        thread = Thread(target=conv)
+        thread.start()
+        thread_list.append(thread)
+        dr, dw, de = select([sys.stdin], [], [], 0)
+        if dr != []:
+            break
+        elif timeout:
+            if (time.time() - start) >= timeout:
+                break
+
+    end = time.time()
+    for thread in thread_list:
+        thread.join()
+    dt = end - start
+    print(f'\nsaving {filename}...')
+    frame_list[0].save(
+        filename, save_all=True, 
+        append_images=frame_list[1:], 
+        duration=dt, loop=0
+    )
+
+
+if __name__ == '__main__':
+    if len(sys.argv) <= 2 or sys.argv[1] in '--help':
+        cmd = sys.argv[0]
+        dev = '/dev/ttyACM0'
+        print(f'usage: {cmd} <serial_dev> [-g [timeout]] <filename>\n')
+        print('examples:')
+        print(f'\t{cmd} {dev} -t ............. check serial')
+        print(f'\t{cmd} {dev} out.png ........ take a png screenshot')
+        print(f'\t{cmd} {dev} out.jpg ........ take a jpg screenshot')
+        print(f'\t{cmd} {dev} -g 10 out.gif .. record a 10 seconds gif')
+        print(f'\t{cmd} {dev} -g out.gif ..... record a gif, no timeout')
+    else:
+        port = sys.argv[1]
+        print(f'connecting to {port}...')
+        try:
+            io = serial.Serial(port, 38400, timeout=3)
+        except serial.SerialException as e:
+            raise
+        filename = sys.argv[-1]
+        if sys.argv[2] in '--test':
+            getId()
+        elif '.' not in filename:
+            print('filename invalid or undefined')
+        elif sys.argv[2] in '--gif':
+            if '.gif' not in filename:
+                print('filename does not end with .gif')
+            else:
+                if len(sys.argv) > 4:
+                    secs = int(sys.argv[3])
+                    gif(filename, secs)
+                else:
+                    gif(filename)
+        else:
+            screenshot(filename)
+        io.close()
+
+
